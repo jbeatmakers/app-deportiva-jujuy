@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🏆 App Deportiva Jujuy</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        header {
+            text-align: center;
+            color: white;
+            margin-bottom: 40px;
+        }
+        
+        h1 {
+            font-size: 3em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        .subtitle {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+        
+        .card {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+        
+        .api-info {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 15px 0;
+            border-left: 4px solid #667eea;
+        }
+        
+        .deportes-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+        
+        .deporte-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 25px;
+            border-radius: 12px;
+            transition: transform 0.3s ease;
+        }
+        
+        .deporte-card:hover {
+            transform: translateY(-5px);
+        }
+        
+        .deporte-card h3 {
+            margin-bottom: 10px;
+            font-size: 1.8em;
+        }
+        
+        .equipos {
+            margin-top: 15px;
+        }
+        
+        .equipo {
+            background: rgba(255,255,255,0.2);
+            padding: 8px 12px;
+            border-radius: 5px;
+            margin: 5px 0;
+        }
+        
+        button {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1em;
+            transition: background 0.3s ease;
+        }
+        
+        button:hover {
+            background: #764ba2;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            font-size: 1.2em;
+            color: #667eea;
+        }
+        
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🏆 App Deportiva Jujuy</h1>
+            <p class="subtitle">Plataforma de Deportes de la Provincia de Jujuy</p>
+        </header>
+        
+        <div class="card">
+            <h2>🚀 API Endpoints Disponibles</h2>
+            <div class="api-info">
+                <p><strong>GET /</strong> - Información de la aplicación</p>
+            </div>
+            <div class="api-info">
+                <p><strong>GET /deportes</strong> - Lista de todos los deportes</p>
+            </div>
+            <div class="api-info">
+                <p><strong>GET /deportes/:id</strong> - Información de un deporte específico</p>
+            </div>
+            <div class="api-info">
+                <p><strong>GET /health</strong> - Estado de la aplicación</p>
+            </div>
+            
+            <button onclick="cargarDeportes()" style="margin-top: 20px;">🔄 Cargar Deportes</button>
+        </div>
+        
+        <div class="card">
+            <h2>🏅 Deportes de Jujuy</h2>
+            <div id="deportes-container" class="deportes-grid">
+                <div class="loading">Haz clic en "Cargar Deportes" para ver la información...</div>
+            </div>
+        </div>
+        
+        <div class="card">
+            <h2>📚 Cómo usar esta API</h2>
+            <p>Para probar la API localmente:</p>
+            <ol style="margin: 15px 0 15px 25px; line-height: 1.8;">
+                <li>Clona el repositorio: <code>git clone https://github.com/jbeatmakers/app-deportiva-jujuy.git</code></li>
+                <li>Instala dependencias: <code>pip install -r requirements.txt</code></li>
+                <li>Ejecuta la app: <code>python app.py</code></li>
+                <li>Abre: <code>http://localhost:5000</code></li>
+            </ol>
+        </div>
+    </div>
+    
+    <script>
+        async function cargarDeportes() {
+            const container = document.getElementById('deportes-container');
+            container.innerHTML = '<div class="loading">🔄 Cargando deportes...</div>';
+            
+            try {
+                // Cambiar esta URL por tu servidor cuando esté desplegado
+                const API_URL = 'http://localhost:5000';
+                const response = await fetch(`${API_URL}/deportes`);
+                const data = await response.json();
+                
+                container.innerHTML = '';
+                
+                data.deportes.forEach(deporte => {
+                    const card = document.createElement('div');
+                    card.className = 'deporte-card';
+                    
+                    let equiposHTML = '<div class="equipos">';
+                    deporte.equipos.forEach(equipo => {
+                        equiposHTML += `<div class="equipo">⚽ ${equipo}</div>`;
+                    });
+                    equiposHTML += '</div>';
+                    
+                    card.innerHTML = `
+                        <h3>${deporte.deporte}</h3>
+                        <p><strong>${deporte.liga}</strong></p>
+                        ${equiposHTML}
+                    `;
+                    
+                    container.appendChild(card);
+                });
+            } catch (error) {
+                container.innerHTML = `
+                    <div class="loading">
+                        ⚠️ Error: No se pudo conectar con la API.<br>
+                        Asegúrate de que el servidor esté corriendo en <code>http://localhost:5000</code>
+                    </div>
+                `;
+            }
+        }
+    </script>
+</body>
+</html>
