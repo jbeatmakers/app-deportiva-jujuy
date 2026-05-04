@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0f172a">
+  <title>App Deportiva Jujuy</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body>
+  <main class="app-shell">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero__content">
+        <p class="eyebrow">Jujuy 360 · Deportes</p>
+        <h1 id="hero-title">Agenda deportiva local, ligas y equipos de Jujuy</h1>
+        <p class="hero__lead">Panel simple para consultar disciplinas, ligas activas, equipos destacados y estado de la API deportiva.</p>
+        <div class="hero__actions">
+          <a class="button button--primary" href="#deportes">Ver deportes</a>
+          <a class="button button--ghost" href="/deportes" target="_blank" rel="noopener">Abrir API</a>
+        </div>
+      </div>
+      <aside class="status-card" aria-label="Estado del sistema">
+        <span class="status-card__label">Estado API</span>
+        <strong id="apiStatus">Verificando…</strong>
+        <small id="apiTime">Sin datos todavía</small>
+      </aside>
+    </section>
+
+    <section class="metrics" aria-label="Resumen deportivo">
+      <article class="metric-card">
+        <span>Total deportes</span>
+        <strong id="totalSports">—</strong>
+      </article>
+      <article class="metric-card">
+        <span>Equipos cargados</span>
+        <strong id="totalTeams">—</strong>
+      </article>
+      <article class="metric-card">
+        <span>Provincia</span>
+        <strong>Jujuy</strong>
+      </article>
+    </section>
+
+    <section class="toolbar" aria-label="Filtros">
+      <div>
+        <h2 id="deportes">Deportes disponibles</h2>
+        <p>Datos consumidos desde el endpoint Flask <code>/deportes</code>.</p>
+      </div>
+      <label class="search-box">
+        <span>Buscar</span>
+        <input id="searchInput" type="search" placeholder="Fútbol, liga, equipo…" autocomplete="off">
+      </label>
+    </section>
+
+    <section id="sportsGrid" class="sports-grid" aria-live="polite"></section>
+
+    <section class="empty-state" id="emptyState" hidden>
+      <h3>Sin resultados</h3>
+      <p>Probá con otra disciplina, liga o equipo.</p>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='js/app.js') }}" defer></script>
+</body>
+</html>
