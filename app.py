@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, render_template
 from flask_cors import CORS
 import os
 from datetime import datetime
@@ -35,6 +35,10 @@ deportes_jujuy = [
 
 @app.route('/')
 def home():
+    return render_template('index.html')
+
+@app.route('/api/info')
+def api_info():
     return jsonify({
         'mensaje': 'Bienvenido a la App Deportiva de Jujuy',
         'version': '1.0',
