@@ -1,0 +1,54 @@
+name: Isolated Pucara production proof
+
+on:
+  push:
+    branches: ['agent/pucara-live-proof-20260818']
+    paths:
+      - '.github/workflows/pucara-live-proof.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/pucara-live-proof-20260818
+          fetch-depth: 0
+      - name: Probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .evidence
+          python3 - <<'PY'
+          import json,time,urllib.parse,urllib.request,urllib.error
+          from pathlib import Path
+          UA='Mozilla/5.0 Jujuy360-Pucara-Isolated-Probe/1.0'
+          def f(url):
+              req=urllib.request.Request(url,headers={'User-Agent':UA,'Cache-Control':'no-cache, no-store','Pragma':'no-cache'})
+              try:
+                  with urllib.request.urlopen(req,timeout=40) as r:return r.status,dict(r.headers),r.read()
+              except urllib.error.HTTPError as e:return e.code,dict(e.headers),e.read()
+              except Exception as e:return 0,{},str(e).encode()
+          base='https://jujuy360.com'; puc='https://pucara.jujuy360.com'
+          hs,hh,hb=f(base+'/wp-json/j360/v1/pucara-health?probe=isolated')
+          try: hj=json.loads(hb.decode())
+          except Exception: hj=None
+          a,_,ab=f(base+'/?probe=isolated-anon')
+          q=urllib.parse.urlencode({'nombre_abogado':'Altea, Julio Rodrigo','probe':'isolated-context'})
+          c,_,cb=f(base+'/?'+q)
+          ps,ph,pb=f(puc+'/api/health')
+          try: pj=json.loads(pb.decode())
+          except Exception: pj=None
+          out={'ts':time.time(),'bridge_health_http':hs,'bridge_health_json':hj,'anon_http':a,'anon_offer':b'id="j360-pd-launch"' in ab,'context_http':c,'context_offer':b'id="j360-pd-launch"' in cb,'context_frame':b'id="j360-pd-frame"' in cb,'pucara_health_http':ps,'pucara_health_json':pj,'pucara_csp':ph.get('Content-Security-Policy',''),'pucara_xfo':ph.get('X-Frame-Options','')}
+          Path('.evidence/pucara-live.json').write_text(json.dumps(out,ensure_ascii=False,indent=2)+'\n')
+          print(json.dumps(out,ensure_ascii=False))
+          PY
+          git config user.name 'Pucara Live Proof Bot'
+          git config user.email 'jbeatmakers@users.noreply.github.com'
+          git add .evidence/pucara-live.json
+          git commit -m 'evidence: Pucara production probe'
+          git push origin HEAD:agent/pucara-live-proof-20260818
