@@ -1,0 +1,326 @@
+name: Encrypted hPanel Pucara deploy
+
+on:
+  push:
+    branches: ['agent/hostinger-filemanager-deploy-20260818']
+    paths:
+      - '.github/workflows/hostinger-pucara-filemanager-deploy.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/hostinger-filemanager-deploy-20260818
+          fetch-depth: 0
+
+      - name: Open encrypted deployment session
+        shell: bash
+        run: |
+          set -euo pipefail
+          SESSION="$GITHUB_RUN_ID"
+          mkdir -p .hpanel-deploy
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out /tmp/hpanel-runner-private.pem >/dev/null 2>&1
+          chmod 600 /tmp/hpanel-runner-private.pem
+          openssl pkey -in /tmp/hpanel-runner-private.pem -pubout -out "/tmp/hpanel-runner-public-${SESSION}.pem" >/dev/null 2>&1
+          git config user.name 'hPanel Deploy Bot'
+          git config user.email 'jbeatmakers@users.noreply.github.com'
+          git pull --rebase origin agent/hostinger-filemanager-deploy-20260818
+          cp "/tmp/hpanel-runner-public-${SESSION}.pem" ".hpanel-deploy/session-${SESSION}-public.pem"
+          printf '{"run_id":"%s","state":"awaiting_bundle"}\n' "$SESSION" > .hpanel-deploy/current-session.json
+          git add ".hpanel-deploy/session-${SESSION}-public.pem" .hpanel-deploy/current-session.json
+          git commit -m "ops: open encrypted hPanel deploy session ${SESSION}"
+          git push origin HEAD:agent/hostinger-filemanager-deploy-20260818
+          echo "DEPLOY_SESSION=$SESSION" >> "$GITHUB_ENV"
+          echo "HPANEL_SESSION_OPEN=$SESSION"
+
+      - name: Receive and decrypt deployment bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          SESSION="$DEPLOY_SESSION"
+          found=0
+          for i in $(seq 1 180); do
+            git fetch -q origin agent/hostinger-filemanager-deploy-20260818
+            if git show "origin/agent/hostinger-filemanager-deploy-20260818:.hpanel-deploy/bundle-${SESSION}.enc.b64" >/tmp/bundle.enc.b64 2>/dev/null \
+              && git show "origin/agent/hostinger-filemanager-deploy-20260818:.hpanel-deploy/bundle-${SESSION}-key.enc.b64" >/tmp/bundle-key.enc.b64 2>/dev/null; then
+              found=1; break
+            fi
+            sleep 5
+          done
+          test "$found" = 1
+          base64 -d /tmp/bundle-key.enc.b64 >/tmp/bundle-key.enc
+          openssl pkeyutl -decrypt -inkey /tmp/hpanel-runner-private.pem -in /tmp/bundle-key.enc \
+            -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 >/tmp/bundle.pass
+          base64 -d /tmp/bundle.enc.b64 >/tmp/bundle.enc
+          openssl enc -d -aes-256-cbc -pbkdf2 -in /tmp/bundle.enc -out /tmp/deploy-bundle.json -pass file:/tmp/bundle.pass
+          chmod 600 /tmp/deploy-bundle.json
+          python3 - <<'PY'
+          import json
+          p='/tmp/deploy-bundle.json'; b=json.load(open(p))
+          required=['reset_url','new_password','plugin_url','plugin_blob_sha','plugin_size','login_email']
+          missing=[k for k in required if not b.get(k)]
+          if missing: raise SystemExit('bundle missing keys: '+','.join(missing))
+          if b['login_email']!='jbeatmakers@gmail.com': raise SystemExit('unexpected login email')
+          if not str(b['reset_url']).startswith('https://auth.hostinger.com/password-reset?token='): raise SystemExit('unexpected reset URL')
+          if len(str(b['new_password'])) < 20: raise SystemExit('password too short')
+          if str(b['plugin_blob_sha'])!='3e9c895d441018ba2bce941e4bc0ebbb4a4da0fe': raise SystemExit('unexpected plugin blob')
+          if int(b['plugin_size'])!=16756: raise SystemExit('unexpected plugin size')
+          print('DEPLOY_BUNDLE_VALID=true')
+          PY
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install browser automation
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --no-save --silent playwright@1.58.2 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+
+      - name: Reset Hostinger, log in, download exact plugin and inspect hPanel
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs=require('fs'), crypto=require('crypto');
+          const {chromium}=require('playwright');
+          const bundle=JSON.parse(fs.readFileSync('/tmp/deploy-bundle.json','utf8'));
+          const clean=s=>String(s||'').replace(/\s+/g,' ').trim();
+          const redact=s=>clean(s).replace(/[A-Za-z0-9_-]{28,}/g,'[redacted]');
+          function gitBlobSha(buf){return crypto.createHash('sha1').update(Buffer.from('blob '+buf.length+'\0')).update(buf).digest('hex');}
+          function safeHref(raw){try{let u=new URL(raw);if(!/hostinger\.com$/i.test(u.hostname)&&!/\.hostinger\.com$/i.test(u.hostname))return '';u.search='';u.hash='';return u.toString();}catch{return '';}}
+          async function bodyText(p){return redact((await p.locator('body').innerText().catch(()=>''))).slice(0,6000);}
+          async function dismissCookies(p){for(const re of [/dismiss/i,/accept all/i,/aceptar todo/i,/accept/i,/aceptar/i]){try{let b=p.getByRole('button',{name:re}).first();if(await b.count()&&await b.isVisible()){await b.click({timeout:3000}).catch(()=>{});break;}}catch{}}}
+          async function clickSubmit(p, patterns){for(const re of patterns){let b=p.getByRole('button',{name:re}).first();if(await b.count()&&await b.isVisible()){await b.click();return true;}}let s=p.locator('button[type=submit],input[type=submit]').first();if(await s.count()){await s.click();return true;}return false;}
+          (async()=>{
+            let evidence={ok:false,stage:'start',reset:false,login:false,plugin_verified:false,websites_url:'',domain_matches:0,links:[],buttons:[],domain_contexts:[],errors:[]};
+            let browser;
+            try{
+              // Download exact private GitHub file using its short-lived encrypted URL.
+              const resp=await fetch(bundle.plugin_url,{redirect:'follow'}); if(!resp.ok)throw new Error('plugin download HTTP '+resp.status);
+              const plugin=Buffer.from(await resp.arrayBuffer());
+              const blob=gitBlobSha(plugin);
+              if(plugin.length!==Number(bundle.plugin_size)||blob!==bundle.plugin_blob_sha)throw new Error(`plugin identity mismatch bytes=${plugin.length} blob=${blob}`);
+              fs.writeFileSync('/tmp/jujuy360-z-pucara-discovery.php',plugin,{mode:0o600}); evidence.plugin_verified=true;
+
+              browser=await chromium.launch({headless:true,args:['--disable-blink-features=AutomationControlled']});
+              const context=await browser.newContext({viewport:{width:1440,height:1000},locale:'es-AR'});
+              const p=await context.newPage();
+
+              evidence.stage='reset';
+              await p.goto(bundle.reset_url,{waitUntil:'domcontentloaded',timeout:60000}); await dismissCookies(p);
+              await p.waitForTimeout(1200);
+              let pw=p.locator('input[type=password]:visible'); let n=await pw.count();
+              if(n<1)throw new Error('reset page has no visible password input: '+(await bodyText(p)).slice(0,500));
+              for(let i=0;i<n;i++)await pw.nth(i).fill(bundle.new_password);
+              if(!await clickSubmit(p,[/reset password/i,/restablecer contraseña/i,/change password/i,/cambiar contraseña/i,/save password/i,/guardar contraseña/i,/continue/i,/continuar/i]))throw new Error('reset submit not found');
+              await p.waitForTimeout(3500);
+              evidence.reset=true;
+
+              evidence.stage='login';
+              await p.goto('https://auth.hostinger.com/login',{waitUntil:'domcontentloaded',timeout:60000}); await dismissCookies(p); await p.waitForTimeout(800);
+              let email=p.locator('input[type=email]:visible,input[name=email]:visible').first();
+              if(!await email.count())throw new Error('login email input missing');
+              await email.fill(bundle.login_email);
+              let pass=p.locator('input[type=password]:visible').first();
+              if(!await pass.count()){
+                await clickSubmit(p,[/continue/i,/continuar/i,/next/i,/siguiente/i]); await p.waitForTimeout(1000); pass=p.locator('input[type=password]:visible').first();
+              }
+              if(!await pass.count())throw new Error('login password input missing');
+              await pass.fill(bundle.new_password);
+              await clickSubmit(p,[/log in/i,/login/i,/iniciar sesión/i,/sign in/i,/continue/i,/continuar/i]);
+              await p.waitForTimeout(5000);
+              if(/auth\.hostinger\.com\/login/.test(p.url())){
+                const t=await bodyText(p); if(/two-factor|2fa|verification code|código de verificación/i.test(t))throw new Error('2FA_REQUIRED');
+                throw new Error('login remained on auth page: '+t.slice(0,700));
+              }
+              evidence.login=true;
+              await context.storageState({path:'/tmp/hpanel-storage.json'}); fs.chmodSync('/tmp/hpanel-storage.json',0o600);
+
+              evidence.stage='websites';
+              await p.goto('https://hpanel.hostinger.com/websites',{waitUntil:'domcontentloaded',timeout:60000}); await p.waitForTimeout(4500); await dismissCookies(p);
+              evidence.websites_url=safeHref(p.url());
+              const domain=p.getByText('jujuy360.com',{exact:false}); evidence.domain_matches=await domain.count();
+              const els=await p.locator('a,button').evaluateAll(nodes=>nodes.slice(0,500).map(x=>({text:(x.innerText||x.textContent||'').replace(/\s+/g,' ').trim().slice(0,180),href:x.href||''})).filter(x=>x.text||x.href));
+              for(const x of els){const text=redact(x.text);if(/file manager|administrador de archivos|dashboard|panel|manage|administrar|jujuy360/i.test(text)||/file-manager|website|hosting/i.test(x.href||'')){const href=safeHref(x.href||'');evidence.links.push({text,href});}}
+              evidence.links=evidence.links.slice(0,100);
+              evidence.buttons=evidence.links.filter(x=>x.text&&!x.href).slice(0,50);
+              for(let i=0;i<Math.min(await domain.count(),5);i++){
+                let el=domain.nth(i);let ctxs=[];
+                for(let up=0;up<7;up++){
+                  const txt=redact(await el.innerText().catch(()=>''));
+                  const controls=await el.locator('a,button').evaluateAll(ns=>ns.map(x=>({text:(x.innerText||x.textContent||'').replace(/\s+/g,' ').trim().slice(0,120),href:x.href||''})).catch(()=>[]);
+                  if(txt||controls.length)ctxs.push({level:up,text:txt.slice(0,900),controls:controls.map(x=>({text:redact(x.text),href:safeHref(x.href)})).slice(0,30)});
+                  el=el.locator('..');
+                }
+                evidence.domain_contexts.push(ctxs);
+              }
+              evidence.page_text=(await bodyText(p)).slice(0,3000);
+              evidence.ok=evidence.reset&&evidence.login&&evidence.plugin_verified&&evidence.domain_matches>0;
+            }catch(err){evidence.errors.push(String(err&&err.message||err).slice(0,1200));}
+            finally{if(browser)await browser.close().catch(()=>{});fs.mkdirSync('.hpanel-deploy',{recursive:true});fs.writeFileSync('.hpanel-deploy/inspection.json',JSON.stringify(evidence,null,2)+'\n');console.log(JSON.stringify({ok:evidence.ok,stage:evidence.stage,reset:evidence.reset,login:evidence.login,plugin_verified:evidence.plugin_verified,domain_matches:evidence.domain_matches,errors:evidence.errors}));}
+            if(!evidence.ok)process.exitCode=3;
+          })();
+          NODE
+
+      - name: Publish sanitized hPanel inspection
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          SESSION="$DEPLOY_SESSION"
+          git config user.name 'hPanel Deploy Bot'
+          git config user.email 'jbeatmakers@users.noreply.github.com'
+          git pull --rebase origin agent/hostinger-filemanager-deploy-20260818
+          cp .hpanel-deploy/inspection.json ".hpanel-deploy/inspection-${SESSION}.json"
+          python3 - <<PY
+          import json
+          p='.hpanel-deploy/current-session.json'
+          json.dump({'run_id':'$SESSION','state':'inspection_ready'},open(p,'w'),indent=2);open(p,'a').write('\n')
+          PY
+          git add ".hpanel-deploy/inspection-${SESSION}.json" .hpanel-deploy/current-session.json
+          git commit -m "ops: publish sanitized hPanel inspection ${SESSION}"
+          git push origin HEAD:agent/hostinger-filemanager-deploy-20260818
+
+      - name: Receive encrypted proceed command
+        shell: bash
+        run: |
+          set -euo pipefail
+          SESSION="$DEPLOY_SESSION"
+          found=0
+          for i in $(seq 1 180); do
+            git fetch -q origin agent/hostinger-filemanager-deploy-20260818
+            if git show "origin/agent/hostinger-filemanager-deploy-20260818:.hpanel-deploy/command-${SESSION}.enc.b64" >/tmp/command.enc.b64 2>/dev/null; then found=1; break; fi
+            sleep 5
+          done
+          test "$found" = 1
+          base64 -d /tmp/command.enc.b64 >/tmp/command.enc
+          openssl pkeyutl -decrypt -inkey /tmp/hpanel-runner-private.pem -in /tmp/command.enc \
+            -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 >/tmp/command.json
+          python3 - <<'PY'
+          import json
+          c=json.load(open('/tmp/command.json'))
+          if c.get('op') not in {'proceed','abort'}: raise SystemExit('unsupported command')
+          print('COMMAND='+c['op'])
+          PY
+
+      - name: Deploy through hPanel File Manager and verify production
+        if: ${{ success() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$(python3 -c "import json;print(json.load(open('/tmp/command.json'))['op'])")" = abort ]; then
+            echo 'DEPLOY_ABORTED_BY_CONTROLLER=true'; exit 0
+          fi
+          node <<'NODE'
+          const fs=require('fs'); const {chromium}=require('playwright');
+          const clean=s=>String(s||'').replace(/\s+/g,' ').trim();
+          const redact=s=>clean(s).replace(/[A-Za-z0-9_-]{28,}/g,'[redacted]');
+          function safeHref(raw){try{let u=new URL(raw);if(!/hostinger\.com$/i.test(u.hostname)&&!/\.hostinger\.com$/i.test(u.hostname))return '';u.search='';u.hash='';return u.toString();}catch{return '';}}
+          async function bodyText(p){return redact(await p.locator('body').innerText().catch(()=>''));}
+          async function clickControl(p,re){for(const role of ['link','button']){let x=p.getByRole(role,{name:re}).first();if(await x.count()&&await x.isVisible()) {await x.click();return true;}}let y=p.getByText(re,{exact:false}).first();if(await y.count()&&await y.isVisible()){await y.click();return true;}return false;}
+          async function enterFolder(p,name){
+            for(let attempt=0;attempt<3;attempt++){
+              let x=p.getByText(name,{exact:true}).first();
+              if(await x.count()&&await x.isVisible()){
+                await x.dblclick({timeout:5000}).catch(async()=>{await x.click();}); await p.waitForTimeout(1800); return true;
+              }
+              await p.waitForTimeout(1200);
+            }
+            return false;
+          }
+          async function proof(){
+            const out={errors:[]}; const get=async u=>{try{let r=await fetch(u,{headers:{'User-Agent':'Jujuy360-hPanel-Deploy-Proof/1.0','Cache-Control':'no-cache'}});return [r.status,await r.text(),Object.fromEntries(r.headers.entries())];}catch(e){return [0,String(e),{}];}};
+            let [hs,hb]=await get('https://jujuy360.com/wp-json/j360/v1/pucara-health?hpanel_proof=1');out.health_http=hs;try{out.health=JSON.parse(hb)}catch{};
+            if(hs!==200||!out.health||out.health.ok!==true)out.errors.push('bridge health not ready');
+            if(!out.health||Number(out.health.padron_total||0)<2797)out.errors.push('padron incomplete');
+            let [as,ab]=await get('https://jujuy360.com/?hpanel_proof=anon');out.anon_http=as;out.anon_offer=ab.includes('id="j360-pd-launch"');if(as!==200||out.anon_offer)out.errors.push('anonymous gating failed');
+            let [cs,cb]=await get('https://jujuy360.com/?nombre_abogado='+encodeURIComponent('Altea, Julio Rodrigo')+'&hpanel_proof=context');out.context_http=cs;out.context_offer=cb.includes('id="j360-pd-launch"');out.context_frame=cb.includes('id="j360-pd-frame"');if(cs!==200||!out.context_offer||!out.context_frame)out.errors.push('lawyer context discovery failed');
+            let [ps,pb,ph]=await get('https://pucara.jujuy360.com/api/health');out.pucara_http=ps;try{out.pucara=JSON.parse(pb)}catch{};out.pucara_csp=ph['content-security-policy']||'';if(ps!==200||!out.pucara||out.pucara.status!=='ok')out.errors.push('Pucara health failed');if(out.pucara_csp.includes('frame-ancestors')&&!out.pucara_csp.includes('jujuy360.com'))out.errors.push('Pucara CSP excludes Jujuy360');out.ok=out.errors.length===0;return out;
+          }
+          (async()=>{
+            let result={ok:false,uploaded:false,rolled_back:false,file_manager_url:'',path_steps:[],errors:[]}; let browser;
+            try{
+              browser=await chromium.launch({headless:true,args:['--disable-blink-features=AutomationControlled']});
+              const ctx=await browser.newContext({storageState:'/tmp/hpanel-storage.json',viewport:{width:1440,height:1000},locale:'es-AR'}); let p=await ctx.newPage();
+              await p.goto('https://hpanel.hostinger.com/websites',{waitUntil:'domcontentloaded',timeout:60000});await p.waitForTimeout(3500);
+              let d=p.getByText('jujuy360.com',{exact:false}).first(); if(!await d.count())throw new Error('jujuy360.com not found on Websites');
+              let row=d; let manage=null;
+              for(let up=0;up<9&&!manage;up++){
+                let controls=row.locator('a,button');let n=await controls.count();
+                for(let i=0;i<n;i++){let c=controls.nth(i),t=clean(await c.innerText().catch(()=>''));if(/dashboard|panel|manage|administrar|gestionar/i.test(t)){manage=c;break;}}
+                if(!manage)row=row.locator('..');
+              }
+              if(manage){await manage.click();await p.waitForTimeout(3500);}else{await d.click();await p.waitForTimeout(3000);}
+              let filePage=p;
+              let fm=p.getByText(/File Manager|Administrador de archivos/i,{exact:false}).first();
+              if(!await fm.count()){
+                for(const re of [/File Manager/i,/Administrador de archivos/i]){for(const role of ['link','button']){let c=p.getByRole(role,{name:re}).first();if(await c.count()){fm=c;break;}}if(await fm.count())break;}
+              }
+              if(!await fm.count())throw new Error('File Manager control not found after domain dashboard: '+(await bodyText(p)).slice(0,900));
+              const newPagePromise=ctx.waitForEvent('page',{timeout:7000}).catch(()=>null);await fm.click();let np=await newPagePromise;if(np)filePage=np;await filePage.waitForLoadState('domcontentloaded',{timeout:60000}).catch(()=>{});await filePage.waitForTimeout(4000);
+              result.file_manager_url=safeHref(filePage.url());
+              // File Manager normally opens at the domain public_html. If not, enter it.
+              let txt=await bodyText(filePage);if(!/wp-content/i.test(txt)&&/public_html/i.test(txt)){if(await enterFolder(filePage,'public_html'))result.path_steps.push('public_html');}
+              if(!await enterFolder(filePage,'wp-content'))throw new Error('wp-content folder not found: '+(await bodyText(filePage)).slice(0,1000));result.path_steps.push('wp-content');
+              if(!await enterFolder(filePage,'mu-plugins'))throw new Error('mu-plugins folder not found: '+(await bodyText(filePage)).slice(0,1000));result.path_steps.push('mu-plugins');
+              await filePage.waitForTimeout(1500);
+              const target='jujuy360-z-pucara-discovery.php';
+              const existing=filePage.getByText(target,{exact:true}).first(); if(await existing.count())throw new Error('target unexpectedly already exists; refusing blind overwrite');
+              let uploaded=false;
+              const input=filePage.locator('input[type=file]').first();
+              if(await input.count()) {await input.setInputFiles('/tmp/jujuy360-z-pucara-discovery.php');uploaded=true;}
+              else {
+                let up=filePage.getByRole('button',{name:/upload|subir/i}).first();if(!await up.count())up=filePage.getByText(/upload|subir/i,{exact:false}).first();if(!await up.count())throw new Error('upload control not found');
+                const chooserPromise=filePage.waitForEvent('filechooser',{timeout:7000});await up.click();const chooser=await chooserPromise;await chooser.setFiles('/tmp/jujuy360-z-pucara-discovery.php');uploaded=true;
+              }
+              if(!uploaded)throw new Error('upload did not start');await filePage.waitForTimeout(5000);
+              if(!await filePage.getByText(target,{exact:true}).count())throw new Error('uploaded file not visible in File Manager');
+              result.uploaded=true;
+              result.proof=await proof();
+              if(!result.proof.ok){
+                // Roll back only the file we just created.
+                let f=filePage.getByText(target,{exact:true}).first();await f.click().catch(()=>{});await f.click({button:'right'}).catch(()=>{});await filePage.waitForTimeout(700);
+                let del=filePage.getByText(/Delete|Borrar|Eliminar|Move to trash|Mover a la papelera/i,{exact:false}).first();if(!await del.count())del=filePage.getByRole('button',{name:/delete|borrar|eliminar/i}).first();
+                if(await del.count()){await del.click();await filePage.waitForTimeout(700);let yes=filePage.getByRole('button',{name:/delete|borrar|eliminar|confirm|sí|yes/i}).last();if(await yes.count())await yes.click();await filePage.waitForTimeout(2500);result.rolled_back=true;}
+                throw new Error('production proof failed: '+result.proof.errors.join(' | '));
+              }
+              result.ok=true;
+            }catch(err){result.errors.push(String(err&&err.message||err).slice(0,1800));}
+            finally{if(browser)await browser.close().catch(()=>{});fs.mkdirSync('.hpanel-deploy',{recursive:true});fs.writeFileSync('.hpanel-deploy/result.json',JSON.stringify(result,null,2)+'\n');console.log(JSON.stringify({ok:result.ok,uploaded:result.uploaded,rolled_back:result.rolled_back,path_steps:result.path_steps,errors:result.errors,proof:result.proof||null}));}
+            if(!result.ok)process.exitCode=4;
+          })();
+          NODE
+
+      - name: Publish sanitized final result
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          SESSION="$DEPLOY_SESSION"
+          git config user.name 'hPanel Deploy Bot'
+          git config user.email 'jbeatmakers@users.noreply.github.com'
+          git pull --rebase origin agent/hostinger-filemanager-deploy-20260818
+          cp .hpanel-deploy/result.json ".hpanel-deploy/result-${SESSION}.json" 2>/dev/null || printf '{"ok":false,"errors":["result file missing"]}\n' > ".hpanel-deploy/result-${SESSION}.json"
+          python3 - <<PY
+          import json
+          r=json.load(open('.hpanel-deploy/result-$SESSION.json'))
+          json.dump({'run_id':'$SESSION','state':'complete','ok':bool(r.get('ok'))},open('.hpanel-deploy/current-session.json','w'),indent=2);open('.hpanel-deploy/current-session.json','a').write('\n')
+          PY
+          git add ".hpanel-deploy/result-${SESSION}.json" .hpanel-deploy/current-session.json
+          git commit -m "ops: publish hPanel Pucara deploy result ${SESSION}"
+          git push origin HEAD:agent/hostinger-filemanager-deploy-20260818
+
+      - name: Destroy plaintext credentials and session
+        if: always()
+        shell: bash
+        run: |
+          rm -f /tmp/hpanel-runner-private.pem /tmp/bundle.pass /tmp/bundle.enc /tmp/bundle-key.enc /tmp/deploy-bundle.json /tmp/command.json /tmp/command.enc /tmp/hpanel-storage.json /tmp/jujuy360-z-pucara-discovery.php
