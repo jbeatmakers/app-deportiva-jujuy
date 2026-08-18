@@ -1,0 +1,51 @@
+name: Hostinger reset request
+
+on:
+  push:
+    branches: ['agent/hostinger-reset-request-20260818']
+    paths: ['.github/workflows/hostinger-reset-request.yml']
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/hostinger-reset-request.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  request:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/hostinger-reset-request-20260818
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Request fresh reset email
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --no-save --silent playwright@1.58.2 >/dev/null 2>&1
+          npx playwright install chromium >/dev/null 2>&1
+          node <<'NODE'
+          const fs=require('fs'); const {chromium}=require('playwright');
+          const clean=s=>String(s||'').replace(/\s+/g,' ').trim();
+          (async()=>{let out={ok:false};const b=await chromium.launch({headless:true});const p=await b.newPage({viewport:{width:1280,height:900}});try{
+            await p.goto('https://auth.hostinger.com/forgot-password',{waitUntil:'domcontentloaded',timeout:60000});
+            const e=p.locator('input[type=email],input[name=email]').first();await e.waitFor({state:'visible',timeout:30000});await e.fill('jbeatmakers@gmail.com');
+            let btn=p.getByRole('button',{name:/send reset email/i});if(!await btn.count())btn=p.locator('button[type=submit],input[type=submit]').first();await btn.click();await p.waitForTimeout(3500);
+            const text=clean(await p.locator('body').innerText().catch(()=>''));out={ok:/sent|check your email|email.*link|reset.*email/i.test(text),url:p.url(),title:clean(await p.title()),body:text.slice(0,700)};
+          }catch(e){out={ok:false,error:e.name+': '+clean(e.message).slice(0,250)}}finally{await b.close();}
+          fs.mkdirSync('.evidence',{recursive:true});fs.writeFileSync('.evidence/hostinger-reset-request.json',JSON.stringify(out,null,2)+'\n');console.log(JSON.stringify(out));if(!out.ok)process.exitCode=2;
+          })();
+          NODE
+      - name: Persist evidence
+        if: always()
+        shell: bash
+        run: |
+          git config user.name 'Hostinger Reset Request Bot'
+          git config user.email 'jbeatmakers@users.noreply.github.com'
+          git add .evidence/hostinger-reset-request.json
+          if ! git diff --cached --quiet; then git commit -m 'evidence: Hostinger reset request'; git push origin HEAD:agent/hostinger-reset-request-20260818; fi
